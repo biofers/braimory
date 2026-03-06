@@ -1,0 +1,58 @@
+services:
+  braimory-db:
+    image: pgvector/pgvector:pg16
+    container_name: ${COMPOSE_PROJECT_NAME:-braimory}-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: braimory
+      POSTGRES_USER: braimory
+      POSTGRES_PASSWORD: ${BRAIMORY_DB_PASSWORD}
+    # Uncomment to expose DB port for external access (e.g. debugging)
+    # ports:
+    #   - "${DB_PORT:-5433}:5432"
+    volumes:
+      - braimory_pgdata:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U braimory -d braimory"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - braimory-net
+
+  braimory-mcp:
+    build:
+      context: ./mcp-server
+      dockerfile: Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-braimory}-mcp
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://braimory:${BRAIMORY_DB_PASSWORD}@braimory-db:5432/braimory
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
+      EMBEDDING_DIMENSIONS: "${EMBEDDING_DIMENSIONS:-768}"
+      MCP_HTTP_PORT: "${MCP_HTTP_PORT:-3100}"
+      MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
+      LLM_MODEL: ${LLM_MODEL:-llama3.2}
+      DB_POOL_SIZE: "${DB_POOL_SIZE:-10}"
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      OAUTH_USERNAME: ${OAUTH_USERNAME:-}
+      OAUTH_PASSWORD: ${OAUTH_PASSWORD:-}
+      OAUTH_ISSUER_URL: ${OAUTH_ISSUER_URL:-http://localhost:3100}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+    ports:
+      - "${MCP_HTTP_PORT:-3100}:${MCP_HTTP_PORT:-3100}"
+    depends_on:
+      braimory-db:
+        condition: service_healthy
+    networks:
+      - braimory-net
+
+volumes:
+  braimory_pgdata:
+    name: ${COMPOSE_PROJECT_NAME:-braimory}_pgdata
+
+networks:
+  braimory-net:
+    name: ${COMPOSE_PROJECT_NAME:-braimory}-net
