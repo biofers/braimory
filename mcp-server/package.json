@@ -1,0 +1,21 @@
+{
+  "name": "braimory-mcp",
+  "version": "1.0.1",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.0",
+    "express": "^4.21.0",
+    "pg": "^8.13.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.0",
+    "typescript": "^5.7.0"
+  }
+}

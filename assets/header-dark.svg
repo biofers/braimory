@@ -1,0 +1,48 @@
+<svg id="headerSvg" viewBox="0 0 400 120" xmlns="http://www.w3.org/2000/svg" class="w-full h-auto">
+                            <!-- Definitions (Same as above) -->
+                            <defs>
+                                <linearGradient id="gradLocalH" x1="0%" y1="0%" x2="100%" y2="100%">
+                                    <stop offset="0%" stop-color="#3b82f6"/>
+                                    <stop offset="100%" stop-color="#6366f1"/>
+                                </linearGradient>
+                                <linearGradient id="gradAIH" x1="100%" y1="100%" x2="0%" y2="0%">
+                                    <stop offset="0%" stop-color="#14b8a6"/>
+                                    <stop offset="100%" stop-color="#0ea5e9"/>
+                                </linearGradient>
+                                <filter id="glowH" x="-20%" y="-20%" width="140%" height="140%">
+                                    <feGaussianBlur stdDeviation="1.5" result="blur"/>
+                                    <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+                                </filter>
+                            </defs>
+
+                            <!-- Logo Graphic (Scaled and translated) -->
+                            <g transform="translate(10, 10) scale(0.83)">
+                                <path d="M60 15 C 35 15, 20 35, 20 55 C 20 75, 30 90, 50 100 C 55 102.5, 60 105, 60 105 L 60 15 Z" fill="url(#gradLocalH)"/>
+                                <path d="M30 40 Q 45 45 60 40" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" fill="none" opacity="0.4"/>
+                                <path d="M25 60 Q 42 65 60 60" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" fill="none" opacity="0.4"/>
+                                <path d="M30 80 Q 45 85 60 80" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" fill="none" opacity="0.4"/>
+                                <path d="M60 15 C 85 15, 100 35, 100 55 C 100 75, 90 90, 70 100 C 65 102.5, 60 105, 60 105 L 60 15 Z" fill="#1e293b" opacity="0.95"/>
+                                <path d="M60 30 L 78 40 L 90 60 L 75 80 L 85 95" stroke="url(#gradAIH)" stroke-width="2.5" stroke-linecap="round" fill="none" opacity="0.7"/>
+                                <path d="M60 55 L 78 40" stroke="url(#gradAIH)" stroke-width="2.5" stroke-linecap="round" fill="none" opacity="0.7"/>
+                                <path d="M60 75 L 75 80 L 60 95" stroke="url(#gradAIH)" stroke-width="2.5" stroke-linecap="round" fill="none" opacity="0.7"/>
+                                <path d="M78 40 L 75 80" stroke="url(#gradAIH)" stroke-width="1.5" stroke-dasharray="3 3" fill="none" opacity="0.5"/>
+                                <path d="M60 55 L 90 60" stroke="url(#gradAIH)" stroke-width="1.5" stroke-dasharray="3 3" fill="none" opacity="0.5"/>
+                                <circle cx="60" cy="30" r="4" fill="#ffffff" filter="url(#glowH)"/>
+                                <circle cx="78" cy="40" r="5" fill="url(#gradAIH)" filter="url(#glowH)"/>
+                                <circle cx="60" cy="55" r="4" fill="#ffffff" filter="url(#glowH)"/>
+                                <circle cx="90" cy="60" r="4.5" fill="url(#gradAIH)" filter="url(#glowH)"/>
+                                <circle cx="60" cy="75" r="4" fill="#ffffff" filter="url(#glowH)"/>
+                                <circle cx="75" cy="80" r="6" fill="url(#gradAIH)" filter="url(#glowH)"/>
+                                <circle cx="85" cy="95" r="3" fill="url(#gradAIH)"/>
+                                <circle cx="60" cy="95" r="3.5" fill="#ffffff"/>
+                            </g>
+
+                            <!-- Typography -->
+                            <text id="logoText" x="120" y="72" font-family="'Inter', system-ui, sans-serif" font-size="44" font-weight="800" fill="#f8fafc" letter-spacing="-1">
+                                Brai<tspan font-weight="300" fill="#94a3b8">mory</tspan>
+                            </text>
+
+                            <text x="122" y="94" font-family="'Inter', system-ui, sans-serif" font-size="12" font-weight="600" fill="#0ea5e9" letter-spacing="1.5" text-transform="uppercase">
+                                Vector Memory <tspan fill="#94a3b8">•</tspan> Self-Hosted
+                            </text>
+                        </svg>
