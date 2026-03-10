@@ -18,10 +18,11 @@ Store, search, and manage persistent thoughts with vector embeddings — fully l
 - **Automatic embeddings** via local Ollama (nomic-embed-text)
 - **LLM metadata extraction** — auto-tags, categorizes, and summarizes thoughts
 - **Encryption at rest** — optional AES-256-GCM for all stored content
-- **OAuth 2.1 + PKCE** — browser-based auth for Claude Desktop and similar clients
+- **OAuth 2.1 + PKCE** — browser-based auth for Claude Desktop and similar clients, persisted in PostgreSQL (survives restarts)
 - **API key auth** — simple header-based auth for Claude Code and CLI tools
 - **Dual transport** — stdio (local pipe) and Streamable HTTP (network access)
-- **Auto re-embed** — recovers embeddings after Ollama downtime
+- **SSE keepalive** — stable long-lived connections through proxies and firewalls
+- **Auto re-embed** — recovers embeddings after Ollama downtime (on startup + every 10 minutes)
 
 ## Compatible clients
 
@@ -136,7 +137,7 @@ https://brain.example.com/mcp
 
 On first use, Claude Desktop will open your browser to the Braimory login page. This page IS the OAuth authorization flow — enter the `OAUTH_USERNAME` and `OAUTH_PASSWORD` from your `.env`. After login, a JWT token is issued and Claude uses it automatically for all future requests.
 
-> **Do I still need `MCP_ACCESS_KEY`?** Yes — even with OAuth-only usage. It serves as the JWT signing secret. Without it (or with one shorter than 64 hex chars), the secret is randomly generated and **all OAuth tokens break on every container restart**. It also protects your public endpoint from unauthorized access outside OAuth.
+> **Do I still need `MCP_ACCESS_KEY`?** Yes — even with OAuth-only usage. It serves as the JWT signing secret. Without it (or with one shorter than 64 hex chars), the secret is randomly generated on each startup — existing access tokens become invalid and clients must re-authenticate via refresh token. OAuth clients and refresh tokens are persisted in PostgreSQL and survive restarts, but a stable `MCP_ACCESS_KEY` avoids unnecessary token churn. It also protects your public endpoint from unauthorized access outside OAuth.
 
 > **Can I use A/B and C together?** Yes — both auth methods work simultaneously on the same server. Claude Code sends the API key header, Claude Desktop sends OAuth tokens. A common setup is both: Claude Code for CLI work + Claude Desktop for the full ecosystem.
 
@@ -177,7 +178,7 @@ All configuration is via environment variables in `.env`:
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `BRAIMORY_DB_PASSWORD` | Yes | PostgreSQL password |
-| `MCP_ACCESS_KEY` | Recommended | API key for MCP access (exactly 64 hex chars). If empty, all endpoints are open. Also used to derive the OAuth JWT secret — without it, tokens invalidate on restart |
+| `MCP_ACCESS_KEY` | Recommended | API key for MCP access (exactly 64 hex chars). If empty, all endpoints are open. Also used as the OAuth JWT signing secret — without it, access tokens invalidate on restart (refresh tokens persist in PostgreSQL) |
 | `ENCRYPTION_KEY` | No | AES-256 key for encryption at rest (exactly 64 hex chars). Any other length silently disables encryption |
 | `OAUTH_USERNAME` | No | Username for OAuth login (both username and password must be set together) |
 | `OAUTH_PASSWORD` | No | Password for OAuth login (both username and password must be set together) |
@@ -206,7 +207,7 @@ All configuration is via environment variables in `.env`:
 ## Security
 
 - **API key auth** (Scenarios A/B): Claude Code sends `x-brain-key` header with every request — checked against `MCP_ACCESS_KEY`
-- **OAuth 2.1 + PKCE** (Scenario C): Claude Desktop can't send custom headers, so it uses OAuth. The login page you see IS the OAuth authorization step — after login, a JWT token is issued and used automatically. Includes brute-force protection (per-IP rate limiting, global lockout after 50 failed attempts)
+- **OAuth 2.1 + PKCE** (Scenario C): Claude Desktop can't send custom headers, so it uses OAuth. The login page you see IS the OAuth authorization step — after login, a JWT token is issued and used automatically. OAuth clients and refresh tokens are persisted in PostgreSQL (survive container restarts). Includes brute-force protection (per-IP rate limiting, global lockout after 50 failed attempts)
 - **Encryption at rest**: Optional AES-256-GCM with per-field IV
 - **Constant-time comparisons**: All credential checks use timing-safe operations
 - **No cloud dependencies**: Everything runs locally
