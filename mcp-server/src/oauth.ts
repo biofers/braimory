@@ -1,8 +1,11 @@
 // OAuth 2.1 + PKCE for Claude Desktop remote MCP
+// Clients + refresh tokens persisted to PostgreSQL (survive restarts)
+// Auth codes + brute force state stay in-memory (short-lived)
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { Router, json, urlencoded } from 'express';
 import type { Request, Response } from 'express';
+import * as db from './db.js';
 
 // --- Config ---
 const OAUTH_USERNAME = process.env.OAUTH_USERNAME || '';
@@ -67,14 +70,10 @@ function esc(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// --- In-memory stores ---
-interface OAuthClient { name: string; redirect_uris: string[]; created_at: number }
+// --- In-memory stores (short-lived only) ---
 interface AuthCode { client_id: string; redirect_uri: string; code_challenge: string; expires_at: number }
-interface RefreshEntry { client_id: string; expires_at: number }
 
-const clients = new Map<string, OAuthClient>();
 const authCodes = new Map<string, AuthCode>();
-const refreshTokens = new Map<string, RefreshEntry>();
 
 // --- Brute force protection ---
 const RATE_WINDOW = 15 * 60_000;       // 15 min
@@ -140,20 +139,25 @@ function recordFailure(ip: string): void {
 }
 
 // Cleanup expired entries hourly (exported for shutdown tracking)
-export const oauthCleanupInterval = setInterval(() => {
-  const now = Date.now();
-  for (const [k, v] of authCodes) if (v.expires_at < now) authCodes.delete(k);
-  for (const [k, v] of refreshTokens) if (v.expires_at < now) refreshTokens.delete(k);
-  for (const [k, v] of blockedIps) if (v < now) blockedIps.delete(k);
-  for (const [k, v] of failedAttempts) if (now - v.windowStart > RATE_WINDOW) failedAttempts.delete(k);
-  for (const [k, v] of registrationCounts) if (now - v.windowStart > 3_600_000) registrationCounts.delete(k);
-  // Evict clients older than 24h with no active refresh tokens
-  const clientTTL = 24 * 3_600_000;
-  const activeClients = new Set([...refreshTokens.values()].map(r => r.client_id));
-  for (const [k, v] of clients) {
-    if (now - v.created_at > clientTTL && !activeClients.has(k)) clients.delete(k);
-  }
-}, 3_600_000);
+export let oauthCleanupInterval: NodeJS.Timeout;
+
+function startOAuthCleanup(): void {
+  oauthCleanupInterval = setInterval(async () => {
+    const now = Date.now();
+    // In-memory cleanup
+    for (const [k, v] of authCodes) if (v.expires_at < now) authCodes.delete(k);
+    for (const [k, v] of blockedIps) if (v < now) blockedIps.delete(k);
+    for (const [k, v] of failedAttempts) if (now - v.windowStart > RATE_WINDOW) failedAttempts.delete(k);
+    for (const [k, v] of registrationCounts) if (now - v.windowStart > 3_600_000) registrationCounts.delete(k);
+    // DB cleanup
+    try {
+      await db.cleanupExpiredRefreshTokens();
+      await db.cleanupExpiredOAuthClients();
+    } catch (e) {
+      console.error('OAuth cleanup failed:', e);
+    }
+  }, 3_600_000);
+}
 
 // --- Exported: verify Bearer token ---
 export function verifyBearerToken(authHeader: string, expectedIssuer?: string): boolean {
@@ -165,9 +169,44 @@ export function verifyBearerToken(authHeader: string, expectedIssuer?: string): 
   return true;
 }
 
+// Allowed redirect URI patterns for auto-registration (prevent open redirect)
+const ALLOWED_REDIRECT_PATTERNS = [
+  /^https:\/\/claude\.ai\//,
+  /^http:\/\/localhost(:\d+)?\//,
+  /^http:\/\/127\.0\.0\.1(:\d+)?\//,
+];
+
+function isRedirectAllowed(uri: string): boolean {
+  return ALLOWED_REDIRECT_PATTERNS.some(p => p.test(uri));
+}
+
+const MAX_REDIRECT_URIS = 5;
+const MAX_CLIENTS = 200;
+
+// Auto-register unknown client_ids (Claude Desktop skips DCR)
+async function ensureClient(clientId: string, redirectUri?: string): Promise<void> {
+  const existing = await db.getOAuthClient(clientId);
+  if (!existing) {
+    const count = await db.countOAuthClients();
+    if (count >= MAX_CLIENTS) {
+      await db.evictOldestOAuthClient();
+    }
+    const uri = redirectUri && isRedirectAllowed(redirectUri) ? redirectUri : 'https://claude.ai/api/mcp/auth_callback';
+    await db.upsertOAuthClient(clientId, clientId, [uri]);
+    console.log(`OAuth: auto-registered client "${clientId}"`);
+  } else if (redirectUri && isRedirectAllowed(redirectUri)) {
+    if (!existing.redirect_uris.includes(redirectUri) && existing.redirect_uris.length < MAX_REDIRECT_URIS) {
+      await db.upsertOAuthClient(clientId, existing.name, [...existing.redirect_uris, redirectUri]);
+    }
+  }
+}
+
 // --- Router factory ---
 export function createOAuthRouter(issuerUrl: string): Router {
   const router = Router();
+
+  // Start cleanup interval
+  startOAuthCleanup();
 
   // CORS — restricted to known OAuth clients
   const ALLOWED_ORIGINS = ['https://claude.ai', 'http://localhost', 'http://127.0.0.1'];
@@ -206,45 +245,8 @@ export function createOAuthRouter(issuerUrl: string): Router {
     });
   });
 
-  // Allowed redirect URI patterns for auto-registration (prevent open redirect)
-  const ALLOWED_REDIRECT_PATTERNS = [
-    /^https:\/\/claude\.ai\//,
-    /^http:\/\/localhost(:\d+)?\//,
-    /^http:\/\/127\.0\.0\.1(:\d+)?\//,
-  ];
-
-  function isRedirectAllowed(uri: string): boolean {
-    return ALLOWED_REDIRECT_PATTERNS.some(p => p.test(uri));
-  }
-
-  const MAX_REDIRECT_URIS = 5;
-  const MAX_CLIENTS = 200;
-
-  // Auto-register unknown client_ids (Claude Desktop skips DCR)
-  function ensureClient(clientId: string, redirectUri?: string): void {
-    if (!clients.has(clientId)) {
-      if (clients.size >= MAX_CLIENTS) {
-        // Evict oldest client
-        let oldestKey: string | undefined;
-        let oldestTime = Infinity;
-        for (const [k, v] of clients) {
-          if (v.created_at < oldestTime) { oldestTime = v.created_at; oldestKey = k; }
-        }
-        if (oldestKey) clients.delete(oldestKey);
-      }
-      const uri = redirectUri && isRedirectAllowed(redirectUri) ? redirectUri : 'https://claude.ai/api/mcp/auth_callback';
-      clients.set(clientId, { name: clientId, redirect_uris: [uri], created_at: Date.now() });
-      console.log(`OAuth: auto-registered client "${clientId}"`);
-    } else if (redirectUri && isRedirectAllowed(redirectUri)) {
-      const client = clients.get(clientId)!;
-      if (!client.redirect_uris.includes(redirectUri) && client.redirect_uris.length < MAX_REDIRECT_URIS) {
-        client.redirect_uris.push(redirectUri);
-      }
-    }
-  }
-
   // Dynamic Client Registration (RFC 7591) — rate limited per IP
-  router.post(['/register', '/oauth/register'], json(), (req: Request, res: Response) => {
+  router.post(['/register', '/oauth/register'], json(), async (req: Request, res: Response) => {
     const ip = getClientIp(req);
     const reg = registrationCounts.get(ip);
     if (reg && Date.now() - reg.windowStart < 3_600_000) {
@@ -267,7 +269,7 @@ export function createOAuthRouter(issuerUrl: string): Router {
       return;
     }
     const clientId = randomBytes(16).toString('hex');
-    clients.set(clientId, { name: client_name || 'unknown', redirect_uris: validUris, created_at: Date.now() });
+    await db.upsertOAuthClient(clientId, client_name || 'unknown', validUris);
     console.log(`OAuth: registered client "${client_name || 'unknown'}" -> ${clientId}`);
     res.status(201).json({
       client_id: clientId,
@@ -280,12 +282,12 @@ export function createOAuthRouter(issuerUrl: string): Router {
   });
 
   // Authorize GET — login form
-  router.get(['/authorize', '/oauth/authorize'], (req: Request, res: Response) => {
+  router.get(['/authorize', '/oauth/authorize'], async (req: Request, res: Response) => {
     const blocked = isBlocked(getClientIp(req));
     if (blocked) { res.status(429).json({ error: 'too_many_requests', error_description: blocked }); return; }
     const { client_id, redirect_uri, state, code_challenge, code_challenge_method } = req.query as Record<string, string>;
     if (!client_id) { res.status(400).json({ error: 'invalid_client' }); return; }
-    ensureClient(client_id, redirect_uri);
+    await ensureClient(client_id, redirect_uri);
     if (!code_challenge) {
       res.status(400).json({ error: 'invalid_request', error_description: 'PKCE required (code_challenge missing)' });
       return;
@@ -322,7 +324,7 @@ button:hover{background:#2563eb}
   });
 
   // Authorize POST — validate credentials, issue auth code, redirect
-  router.post(['/authorize', '/oauth/authorize'], urlencoded({ extended: false }), (req: Request, res: Response) => {
+  router.post(['/authorize', '/oauth/authorize'], urlencoded({ extended: false }), async (req: Request, res: Response) => {
     const ip = getClientIp(req);
 
     // Brute force check BEFORE anything else
@@ -343,8 +345,12 @@ body{font-family:system-ui;display:flex;justify-content:center;align-items:cente
       res.status(400).json({ error: 'invalid_request', error_description: 'PKCE required (code_challenge missing)' });
       return;
     }
-    ensureClient(client_id, redirect_uri);
-    const client = clients.get(client_id)!;
+    await ensureClient(client_id, redirect_uri);
+    const client = await db.getOAuthClient(client_id);
+    if (!client) {
+      res.status(400).json({ error: 'invalid_client' });
+      return;
+    }
 
     const finalRedirect = (redirect_uri && client.redirect_uris.includes(redirect_uri))
       ? redirect_uri : client.redirect_uris[0];
@@ -382,7 +388,7 @@ body{font-family:system-ui;display:flex;justify-content:center;align-items:cente
   });
 
   // Token endpoint
-  router.post(['/token', '/oauth/token'], urlencoded({ extended: false }), json(), (req: Request, res: Response) => {
+  router.post(['/token', '/oauth/token'], urlencoded({ extended: false }), json(), async (req: Request, res: Response) => {
     const { grant_type, code, redirect_uri, client_id, code_verifier, refresh_token } = req.body || {};
 
     if (grant_type === 'authorization_code') {
@@ -410,7 +416,7 @@ body{font-family:system-ui;display:flex;justify-content:center;align-items:cente
       const now = Math.floor(Date.now() / 1000);
       const accessToken = signJwt({ sub: OAUTH_USERNAME, iss: issuerUrl, iat: now, exp: now + ACCESS_TOKEN_TTL, scope: 'mcp', client_id });
       const refresh = randomBytes(32).toString('hex');
-      refreshTokens.set(refresh, { client_id, expires_at: Date.now() + REFRESH_TOKEN_TTL * 1000 });
+      await db.saveRefreshToken(refresh, client_id, Date.now() + REFRESH_TOKEN_TTL * 1000);
 
       console.log(`OAuth: tokens issued for client ${client_id}`);
       res.json({ access_token: accessToken, token_type: 'Bearer', expires_in: ACCESS_TOKEN_TTL, refresh_token: refresh, scope: 'mcp' });
@@ -418,7 +424,7 @@ body{font-family:system-ui;display:flex;justify-content:center;align-items:cente
     }
 
     if (grant_type === 'refresh_token') {
-      const stored = refreshTokens.get(refresh_token);
+      const stored = await db.getRefreshToken(refresh_token);
       if (!stored || stored.expires_at < Date.now()) {
         res.status(400).json({ error: 'invalid_grant', error_description: 'invalid or expired refresh token' });
         return;
@@ -427,12 +433,12 @@ body{font-family:system-ui;display:flex;justify-content:center;align-items:cente
         res.status(400).json({ error: 'invalid_grant', error_description: 'client_id mismatch' });
         return;
       }
-      refreshTokens.delete(refresh_token); // rotate
+      await db.deleteRefreshToken(refresh_token); // rotate
 
       const now = Math.floor(Date.now() / 1000);
       const accessToken = signJwt({ sub: OAUTH_USERNAME, iss: issuerUrl, iat: now, exp: now + ACCESS_TOKEN_TTL, scope: 'mcp', client_id: stored.client_id });
       const newRefresh = randomBytes(32).toString('hex');
-      refreshTokens.set(newRefresh, { client_id: stored.client_id, expires_at: Date.now() + REFRESH_TOKEN_TTL * 1000 });
+      await db.saveRefreshToken(newRefresh, stored.client_id, Date.now() + REFRESH_TOKEN_TTL * 1000);
 
       console.log(`OAuth: tokens refreshed for client ${stored.client_id}`);
       res.json({ access_token: accessToken, token_type: 'Bearer', expires_in: ACCESS_TOKEN_TTL, refresh_token: newRefresh, scope: 'mcp' });

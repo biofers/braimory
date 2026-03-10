@@ -84,6 +84,8 @@ const transport = process.argv.includes('--transport') && process.argv[process.a
 
 // Run migrations before anything else
 await runMigrations();
+await db.ensureOAuthTables();
+console.log('Migration: OAuth tables ensured.');
 
 if (transport === 'stdio') {
   // stdio mode: single server instance, direct pipe
@@ -199,7 +201,7 @@ if (transport === 'stdio') {
     res.status(400).json({ error: 'Bad request — send initialize first or include mcp-session-id header' });
   });
 
-  // GET /mcp — SSE stream
+  // GET /mcp — SSE stream (with keepalive)
   app.get('/mcp', async (req: Request, res: Response) => {
     if (!checkAuth(req)) {
       sendUnauthorized(res);
@@ -211,7 +213,22 @@ if (transport === 'stdio') {
       res.status(400).json({ error: 'Invalid or missing session' });
       return;
     }
+
+    // Disable timeout for SSE connections
+    req.setTimeout(0);
+    res.setTimeout(0);
+
     await sessions[sessionId].handleRequest(req, res);
+
+    // Send SSE keepalive comments every 30s to prevent proxy/firewall disconnects
+    const keepalive = setInterval(() => {
+      if (!res.writableEnded) {
+        res.write(':keepalive\n\n');
+      } else {
+        clearInterval(keepalive);
+      }
+    }, 30_000);
+    res.on('close', () => clearInterval(keepalive));
   });
 
   // DELETE /mcp — terminate session
@@ -232,7 +249,8 @@ if (transport === 'stdio') {
   httpServer = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Braimory MCP listening on http://0.0.0.0:${PORT}`);
   });
-  httpServer.timeout = 120_000; // 2 min request timeout
+  httpServer.timeout = 0;           // Disable default timeout (SSE needs long-lived connections)
+  httpServer.keepAliveTimeout = 65_000; // Slightly above common proxy timeouts (60s)
 
   // Re-embed on startup + periodically (every 10 min)
   let reEmbedRunning = false;

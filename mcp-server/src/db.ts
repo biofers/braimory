@@ -301,3 +301,106 @@ export async function encryptExistingThought(id: string, encContent: string, enc
   );
 }
 
+// --- OAuth persistence (clients + refresh tokens in PostgreSQL) ---
+
+export async function ensureOAuthTables(): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS oauth_clients (
+      client_id TEXT PRIMARY KEY,
+      name TEXT NOT NULL DEFAULT 'unknown',
+      redirect_uris TEXT[] NOT NULL DEFAULT '{}',
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
+      token TEXT PRIMARY KEY,
+      client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+      expires_at BIGINT NOT NULL
+    );
+  `);
+}
+
+// --- OAuth client CRUD ---
+
+export interface OAuthClientRow {
+  client_id: string;
+  name: string;
+  redirect_uris: string[];
+  created_at: number;
+}
+
+export async function getOAuthClient(clientId: string): Promise<OAuthClientRow | null> {
+  const { rows } = await pool.query(
+    'SELECT client_id, name, redirect_uris, EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS created_at FROM oauth_clients WHERE client_id = $1',
+    [clientId]
+  );
+  return rows[0] ?? null;
+}
+
+export async function upsertOAuthClient(clientId: string, name: string, redirectUris: string[]): Promise<void> {
+  await pool.query(
+    `INSERT INTO oauth_clients (client_id, name, redirect_uris)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (client_id) DO UPDATE SET redirect_uris = $3`,
+    [clientId, name, redirectUris]
+  );
+}
+
+export async function deleteOAuthClient(clientId: string): Promise<void> {
+  await pool.query('DELETE FROM oauth_clients WHERE client_id = $1', [clientId]);
+}
+
+export async function countOAuthClients(): Promise<number> {
+  const { rows } = await pool.query('SELECT COUNT(*)::int AS count FROM oauth_clients');
+  return rows[0].count;
+}
+
+export async function evictOldestOAuthClient(): Promise<void> {
+  await pool.query(`
+    DELETE FROM oauth_clients WHERE client_id = (
+      SELECT client_id FROM oauth_clients ORDER BY created_at ASC LIMIT 1
+    )
+  `);
+}
+
+export async function cleanupExpiredOAuthClients(): Promise<void> {
+  await pool.query(`
+    DELETE FROM oauth_clients c
+    WHERE c.created_at < NOW() - INTERVAL '24 hours'
+      AND NOT EXISTS (
+        SELECT 1 FROM oauth_refresh_tokens r
+        WHERE r.client_id = c.client_id AND r.expires_at > $1
+      )
+  `, [Date.now()]);
+}
+
+// --- OAuth refresh token CRUD ---
+
+export interface RefreshTokenRow {
+  token: string;
+  client_id: string;
+  expires_at: number;
+}
+
+export async function getRefreshToken(token: string): Promise<RefreshTokenRow | null> {
+  const { rows } = await pool.query(
+    'SELECT token, client_id, expires_at::bigint AS expires_at FROM oauth_refresh_tokens WHERE token = $1',
+    [token]
+  );
+  return rows[0] ?? null;
+}
+
+export async function saveRefreshToken(token: string, clientId: string, expiresAt: number): Promise<void> {
+  await pool.query(
+    'INSERT INTO oauth_refresh_tokens (token, client_id, expires_at) VALUES ($1, $2, $3)',
+    [token, clientId, expiresAt]
+  );
+}
+
+export async function deleteRefreshToken(token: string): Promise<void> {
+  await pool.query('DELETE FROM oauth_refresh_tokens WHERE token = $1', [token]);
+}
+
+export async function cleanupExpiredRefreshTokens(): Promise<void> {
+  await pool.query('DELETE FROM oauth_refresh_tokens WHERE expires_at < $1', [Date.now()]);
+}
+

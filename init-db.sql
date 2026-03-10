@@ -36,3 +36,17 @@ CREATE TRIGGER thoughts_updated_at
     BEFORE UPDATE ON thoughts
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at();
+
+-- OAuth persistence (survives container restarts)
+CREATE TABLE IF NOT EXISTS oauth_clients (
+    client_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT 'unknown',
+    redirect_uris TEXT[] NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
+    token TEXT PRIMARY KEY,
+    client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+    expires_at BIGINT NOT NULL
+);
